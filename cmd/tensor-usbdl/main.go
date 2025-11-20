@@ -225,7 +225,7 @@ func main() {
 	var img []byte
 	var err error
 
-	img = make([]byte, 12288)
+	img = make([]byte, 4096)
 	if dpm != "" {
 		img, err = readFile(dpm)
 		if err != nil {
