@@ -875,6 +875,10 @@ func checkBatteryStatus(log *logger.Logger, fb *tensorutils.Fastboot, voltage st
 
 // formatWithComma formats an integer with comma separators
 func formatWithComma(n int) string {
+	// Handle negative numbers
+	if n < 0 {
+		return "-" + formatWithComma(-n)
+	}
 	s := fmt.Sprintf("%d", n)
 	if len(s) <= 3 {
 		return s
