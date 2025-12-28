@@ -209,14 +209,15 @@ func main() {
 	log = logger.NewLogger(app, 2)
 
 	// If --fastboot is specified, skip EUB and go directly to fastboot monitoring
+	// After fastboot monitoring returns, fall through to normal EUB flow
 	if testFastboot {
 		if fastbootSerial != "" {
 			log.Infof("Testing fastboot mode with serial: %s", fastbootSerial)
 		} else {
 			log.Infoln("Testing fastboot mode (auto-detecting device)")
 		}
-		monitorFastboot(log, fastbootSerial, false) // false = don't wait 60 seconds
-		return
+		monitorFastboot(log, fastbootSerial, true) // true = wait for device
+		log.Infoln("Fastboot monitoring complete, continuing to EUB mode...")
 	}
 
 	if header <= 0 {
@@ -593,10 +594,10 @@ func main() {
 
 		// Monitor fastboot if BL3B was sent
 		if bl3bSent {
-			// First, scan for EUB reconnection for 60 seconds
-			log.Infoln("Scanning for EUB reconnection (60 seconds)...")
+			// First, scan for EUB reconnection for 30 seconds
+			log.Infoln("Scanning for EUB reconnection (30 seconds)...")
 			eubFound := false
-			for i := 0; i < 20; i++ { // 20 checks * 3 seconds = 60 seconds
+			for i := 0; i < 10; i++ { // 10 checks * 3 seconds = 30 seconds
 				time.Sleep(3 * time.Second)
 				testDnw, err := tensorutils.GetDNW()
 				if err == nil {
@@ -654,6 +655,7 @@ func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 		}
 
 		// On first connection, display full device info
+		isFirstConnection := firstConnection
 		if firstConnection {
 			log.Infoln("=== Fastboot Device Info ===")
 			displayFastbootInfo(log, fb)
@@ -666,18 +668,90 @@ func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 
 		if vErr != nil {
 			log.Tracef("Failed to get battery voltage: %v", vErr)
-		} else {
-			checkBatteryVoltage(log, voltage, current)
 		}
-
 		if cErr != nil {
 			log.Tracef("Failed to get battery current: %v", cErr)
-		} else {
-			checkBatteryCurrent(log, current)
+		}
+		if vErr == nil || cErr == nil {
+			checkBatteryStatus(log, fb, voltage, current, isFirstConnection)
+		}
+
+		// Check if charging has stopped (battery full or not charging)
+		// Small negative values like -7mA also indicate charging stopped
+		if cErr == nil {
+			mA := parseCurrentMA(current)
+			if mA > -15 && mA < 50 {
+				// Check device state - if not "error", unbricking worked
+				deviceState, sErr := fb.GetVar("device-state")
+				if sErr == nil && deviceState != "error" {
+					log.Infoln("Charging complete - device state is not error, unbricking successful!")
+
+					// Check if already unlocked
+					unlocked, uErr := fb.GetVar("unlocked")
+					if uErr == nil && unlocked == "yes" {
+						log.Infoln("Device is already unlocked - you can flash normally")
+					} else {
+						log.Infoln("Attempting to send unlock command...")
+						// Try flashing unlock first (Pixel standard), then oem unlock
+						if err := fb.FlashingUnlock(); err != nil {
+							log.Warnf("flashing unlock failed, trying oem unlock: %v", err)
+							if _, err := fb.OemCommand("unlock"); err != nil {
+								log.Warnf("oem unlock also failed (may need manual confirmation): %v", err)
+							}
+						}
+						log.Infoln("You can now flash your device normally")
+					}
+					fb.Close()
+					return
+				}
+
+				log.Infoln("Charging complete or stopped - powering off device to return to EUB mode")
+				// Try multiple shutdown methods
+				// Note: powerdown causes device to hang, skip it
+				// log.Infoln("Trying powerdown...")
+				// fb.PowerOff()
+				// log.Infoln("Waiting for device to power off...")
+				// time.Sleep(3 * time.Second)
+
+				// Try reboot first
+				log.Infoln("Trying reboot...")
+				if err := fb.Reboot(); err != nil {
+					log.Warnf("Reboot command failed: %v", err)
+				}
+				time.Sleep(3 * time.Second)
+
+				// Check if device is still connected
+				log.Infoln("Checking if device disconnected...")
+				time.Sleep(1 * time.Second)
+				if _, err := fb.GetVarWithTimeout("product", 1*time.Second); err == nil {
+					fb.Close()
+					log.Warnln("Auto power-off failed. Please manually:")
+					log.Warnln("  1. Disconnect the phone from USB")
+					log.Warnln("  2. Hold power button to power off the device")
+					log.Warnln("  3. Reconnect the phone to USB")
+					log.Infoln("Waiting for device to disconnect...")
+					for {
+						time.Sleep(1 * time.Minute)
+						testFb, err := tensorutils.GetFastboot(serial)
+						if err != nil {
+							break // Device disconnected
+						}
+						// Show battery status while waiting
+						voltage, _ := testFb.GetVar("battery-voltage")
+						current, _ := testFb.GetVar("battery-current")
+						checkBatteryStatus(log, testFb, voltage, current, false)
+						testFb.Close()
+					}
+					log.Infoln("Device disconnected, continuing to EUB mode...")
+				} else {
+					fb.Close()
+				}
+				return
+			}
 		}
 
 		fb.Close()
-		time.Sleep(5 * time.Minute)
+		time.Sleep(1 * time.Minute)
 
 		// Reconnect for next check
 		fb, err = tensorutils.GetFastboot(serial)
@@ -707,7 +781,7 @@ func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
 		log.Infof("Serial number: %s", val)
 	}
 	if speed := fb.GetSpeed(); speed != "" {
-		log.Infof("USB speed: %s", speed)
+		log.Infof("USB speed: %s", formatUSBSpeed(speed))
 	}
 
 	// Security state
@@ -751,42 +825,51 @@ func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
 
 	// Battery info
 	if val, err := fb.GetVar("battery-voltage"); err == nil {
-		log.Infof("Battery voltage: %s", val)
+		mV := parseVoltage(val)
+		log.Infof("Battery voltage: %smV", formatWithComma(mV))
 	}
 	if val, err := fb.GetVar("battery-current"); err == nil {
-		log.Infof("Battery current: %s", val)
+		mA := parseCurrentMA(val)
+		log.Infof("Battery current: %smA", formatWithComma(mA))
 	}
 
 	log.Infoln("============================")
 }
 
-// checkBatteryVoltage parses voltage string and warns if below 4200mV
-func checkBatteryVoltage(log *logger.Logger, voltage string, current string) {
-	// Parse voltage like "4292 mV" or "4292mV"
-	voltage = strings.TrimSpace(voltage)
-	voltage = strings.TrimSuffix(voltage, " mV")
-	voltage = strings.TrimSuffix(voltage, "mV")
+// checkBatteryStatus displays combined battery voltage and current status
+func checkBatteryStatus(log *logger.Logger, fb *tensorutils.Fastboot, voltage string, current string, isFirstConnection bool) {
+	mV := parseVoltage(voltage)
+	mA := parseCurrentMA(current)
 
-	// Parse current to check charging rate
-	currentStr := strings.TrimSpace(current)
-	currentStr = strings.TrimSuffix(currentStr, " mA")
-	currentStr = strings.TrimSuffix(currentStr, "mA")
-	var mA int
-	fmt.Sscanf(currentStr, "%d", &mA)
+	fmtV := formatWithComma(mV)
+	fmtA := formatWithComma(mA)
 
-	var mV int
-	if _, err := fmt.Sscanf(voltage, "%d", &mV); err == nil {
-		formatted := formatWithComma(mV)
-		if mV < 4200 {
-			log.Warnf("Battery at %smV - keep waiting, need at least 4,200mV for stable boot", formatted)
-			if mA < 600 {
-				log.Warnf("Charging slowly at %dmA - try a USB-C port or different cable for faster charging", mA)
+	// Determine status message based on voltage and current
+	if mA < 0 {
+		// Discharging
+		log.Warnf("Battery: %smV @ %smA - DISCHARGING! Try a different USB port/cable", fmtV, fmtA)
+		if isFirstConnection && fb != nil {
+			log.Infoln("Attempting USB reset to restart charging...")
+			if err := fb.Reset(); err != nil {
+				log.Warnf("USB reset failed: %v", err)
+				log.Warnf("TIP: Try unplugging and replugging the device manually")
+			} else {
+				log.Infoln("USB reset sent - charging should start soon")
 			}
-		} else if mA < 500 {
-			log.Infof("Battery at %smV - sufficient for boot (full charge may take up to 24 hours)", formatted)
-		} else {
-			log.Infof("Battery at %smV - sufficient for boot (charging well, keep waiting for full charge)", formatted)
 		}
+	} else if mV < 4200 {
+		// Need more charge
+		if mA < 600 {
+			log.Warnf("Battery: %smV @ %smA - need 4,200mV, charging slowly, try USB-C port", fmtV, fmtA)
+		} else {
+			log.Warnf("Battery: %smV @ %smA - need at least 4,200mV for stable boot", fmtV, fmtA)
+		}
+	} else if mA < 500 {
+		// Sufficient but charging slowly
+		log.Infof("Battery: %smV @ %smA - charging slowly, full charge may take up to 24 hours", fmtV, fmtA)
+	} else {
+		// Charging well
+		log.Infof("Battery: %smV @ %smA - charging well, keep waiting for full charge", fmtV, fmtA)
 	}
 }
 
@@ -800,21 +883,42 @@ func formatWithComma(n int) string {
 	return s[:len(s)-3] + "," + s[len(s)-3:]
 }
 
-// checkBatteryCurrent parses current string and warns if negative (discharging)
-func checkBatteryCurrent(log *logger.Logger, current string) {
-	// Parse current like "-106 mA" or "250mA"
+// parseCurrentMA extracts the current value in mA from a string like "319 mA" or "-106mA"
+func parseCurrentMA(current string) int {
 	current = strings.TrimSpace(current)
 	current = strings.TrimSuffix(current, " mA")
 	current = strings.TrimSuffix(current, "mA")
-
 	var mA int
-	if _, err := fmt.Sscanf(current, "%d", &mA); err == nil {
-		if mA < 0 {
-			log.Warnf("Battery current: %dmA - DISCHARGING! Device not charging properly, try a different USB port/cable", mA)
-		} else if mA == 0 {
-			log.Infof("Battery current: %dmA - not charging", mA)
-		} else {
-			log.Infof("Battery current: %dmA - charging", mA)
-		}
+	fmt.Sscanf(current, "%d", &mA)
+	return mA
+}
+
+// parseVoltage extracts the voltage value in mV from a string like "4302 mV" or "4302mV"
+func parseVoltage(voltage string) int {
+	voltage = strings.TrimSpace(voltage)
+	voltage = strings.TrimSuffix(voltage, " mV")
+	voltage = strings.TrimSuffix(voltage, "mV")
+	var mV int
+	fmt.Sscanf(voltage, "%d", &mV)
+	return mV
+}
+
+// formatUSBSpeed converts gousb speed string to human-readable format with max charge rate
+func formatUSBSpeed(speed string) string {
+	switch strings.ToLower(speed) {
+	case "low":
+		return "USB 1.0 Low Speed (1.5 Mbps, max 100mA)"
+	case "full":
+		return "USB 1.1 Full Speed (12 Mbps, max 100mA)"
+	case "high":
+		return "USB 2.0 High Speed (480 Mbps, max 500mA)"
+	case "super":
+		return "USB 3.0 SuperSpeed (5 Gbps, max 900mA)"
+	case "superplus":
+		return "USB 3.1 SuperSpeed+ (10 Gbps, max 900mA)"
+	case "superspeedplus":
+		return "USB 3.1 SuperSpeed+ (10 Gbps, max 900mA)"
+	default:
+		return speed
 	}
 }

@@ -247,6 +247,55 @@ func (fb *Fastboot) GetSpeed() string {
 	return fb.speed
 }
 
+// Reboot sends the reboot command to restart the device
+func (fb *Fastboot) Reboot() error {
+	return fb.sendCommand("reboot", 5*time.Second)
+}
+
+// PowerOff sends the powerdown command to shut off the device
+func (fb *Fastboot) PowerOff() error {
+	return fb.sendCommand("powerdown", 5*time.Second)
+}
+
+// sendCommand sends a command and waits for OKAY/FAIL response
+func (fb *Fastboot) sendCommand(cmd string, timeout time.Duration) error {
+	_, err := fb.out.Write([]byte(cmd))
+	if err != nil {
+		return fmt.Errorf("fastboot: write failed: %v", err)
+	}
+
+	// Read response with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	buf := make([]byte, 256)
+	n, err := fb.in.ReadContext(ctx, buf)
+	if err != nil {
+		return fmt.Errorf("fastboot: read failed: %v", err)
+	}
+
+	resp := string(buf[:n])
+	if strings.HasPrefix(resp, "OKAY") {
+		return nil
+	} else if strings.HasPrefix(resp, "FAIL") {
+		return fmt.Errorf("%s", strings.TrimPrefix(resp, "FAIL"))
+	}
+	return nil
+}
+
+// FlashingUnlock sends the flashing unlock command (Pixel standard)
+func (fb *Fastboot) FlashingUnlock() error {
+	return fb.sendCommand("flashing unlock", 10*time.Second)
+}
+
+// Reset performs a USB device reset
+func (fb *Fastboot) Reset() error {
+	if fb.dev == nil {
+		return fmt.Errorf("fastboot: device not open")
+	}
+	return fb.dev.Reset()
+}
+
 // Close releases all resources
 func (fb *Fastboot) Close() error {
 	if fb.done != nil {

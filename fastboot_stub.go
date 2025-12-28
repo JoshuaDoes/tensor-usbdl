@@ -41,6 +41,22 @@ func (fb *Fastboot) GetSpeed() string {
 	return ""
 }
 
+func (fb *Fastboot) Reboot() error {
+	return fmt.Errorf("fastboot not available")
+}
+
+func (fb *Fastboot) PowerOff() error {
+	return fmt.Errorf("fastboot not available")
+}
+
+func (fb *Fastboot) FlashingUnlock() error {
+	return fmt.Errorf("fastboot not available")
+}
+
+func (fb *Fastboot) Reset() error {
+	return fmt.Errorf("fastboot not available")
+}
+
 func (fb *Fastboot) Close() error {
 	return nil
 }
