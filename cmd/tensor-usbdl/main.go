@@ -660,22 +660,20 @@ func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 			firstConnection = false
 		}
 
-		// Get battery voltage
-		voltage, err := fb.GetVar("battery-voltage")
-		if err != nil {
-			log.Tracef("Failed to get battery voltage: %v", err)
+		// Get battery voltage and current
+		voltage, vErr := fb.GetVar("battery-voltage")
+		current, cErr := fb.GetVar("battery-current")
+
+		if vErr != nil {
+			log.Tracef("Failed to get battery voltage: %v", vErr)
 		} else {
-			log.Infof("Battery voltage: %s", voltage)
-			// Parse voltage and check if below threshold
-			checkBatteryVoltage(log, voltage)
+			checkBatteryVoltage(log, voltage, current)
 		}
 
-		// Get unlock status
-		unlocked, err := fb.GetVar("unlocked")
-		if err != nil {
-			log.Tracef("Failed to get unlock status: %v", err)
+		if cErr != nil {
+			log.Tracef("Failed to get battery current: %v", cErr)
 		} else {
-			log.Infof("Unlock status: %s", unlocked)
+			checkBatteryCurrent(log, current)
 		}
 
 		fb.Close()
@@ -707,6 +705,9 @@ func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
 	}
 	if val, err := fb.GetVar("serialno"); err == nil {
 		log.Infof("Serial number: %s", val)
+	}
+	if speed := fb.GetSpeed(); speed != "" {
+		log.Infof("USB speed: %s", speed)
 	}
 
 	// Security state
@@ -748,22 +749,72 @@ func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
 		log.Infof("UART: %s", val)
 	}
 
+	// Battery info
+	if val, err := fb.GetVar("battery-voltage"); err == nil {
+		log.Infof("Battery voltage: %s", val)
+	}
+	if val, err := fb.GetVar("battery-current"); err == nil {
+		log.Infof("Battery current: %s", val)
+	}
+
 	log.Infoln("============================")
 }
 
 // checkBatteryVoltage parses voltage string and warns if below 4200mV
-func checkBatteryVoltage(log *logger.Logger, voltage string) {
+func checkBatteryVoltage(log *logger.Logger, voltage string, current string) {
 	// Parse voltage like "4292 mV" or "4292mV"
 	voltage = strings.TrimSpace(voltage)
 	voltage = strings.TrimSuffix(voltage, " mV")
 	voltage = strings.TrimSuffix(voltage, "mV")
 
+	// Parse current to check charging rate
+	currentStr := strings.TrimSpace(current)
+	currentStr = strings.TrimSuffix(currentStr, " mA")
+	currentStr = strings.TrimSuffix(currentStr, "mA")
+	var mA int
+	fmt.Sscanf(currentStr, "%d", &mA)
+
 	var mV int
 	if _, err := fmt.Sscanf(voltage, "%d", &mV); err == nil {
+		formatted := formatWithComma(mV)
 		if mV < 4200 {
-			log.Warnf("Battery at %dmV - keep waiting, need at least 4200mV for stable boot", mV)
+			log.Warnf("Battery at %smV - keep waiting, need at least 4,200mV for stable boot", formatted)
+			if mA < 600 {
+				log.Warnf("Charging slowly at %dmA - try a USB-C port or different cable for faster charging", mA)
+			}
+		} else if mA < 500 {
+			log.Infof("Battery at %smV - sufficient for boot (full charge may take up to 24 hours)", formatted)
 		} else {
-			log.Infof("Battery at %dmV - sufficient for boot (full charge may take up to 24 hours)", mV)
+			log.Infof("Battery at %smV - sufficient for boot (charging well, keep waiting for full charge)", formatted)
+		}
+	}
+}
+
+// formatWithComma formats an integer with comma separators
+func formatWithComma(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	// Insert comma for thousands
+	return s[:len(s)-3] + "," + s[len(s)-3:]
+}
+
+// checkBatteryCurrent parses current string and warns if negative (discharging)
+func checkBatteryCurrent(log *logger.Logger, current string) {
+	// Parse current like "-106 mA" or "250mA"
+	current = strings.TrimSpace(current)
+	current = strings.TrimSuffix(current, " mA")
+	current = strings.TrimSuffix(current, "mA")
+
+	var mA int
+	if _, err := fmt.Sscanf(current, "%d", &mA); err == nil {
+		if mA < 0 {
+			log.Warnf("Battery current: %dmA - DISCHARGING! Device not charging properly, try a different USB port/cable", mA)
+		} else if mA == 0 {
+			log.Infof("Battery current: %dmA - not charging", mA)
+		} else {
+			log.Infof("Battery current: %dmA - charging", mA)
 		}
 	}
 }

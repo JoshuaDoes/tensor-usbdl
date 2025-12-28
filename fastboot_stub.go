@@ -37,6 +37,10 @@ func (fb *Fastboot) GetSerial() string {
 	return ""
 }
 
+func (fb *Fastboot) GetSpeed() string {
+	return ""
+}
+
 func (fb *Fastboot) Close() error {
 	return nil
 }

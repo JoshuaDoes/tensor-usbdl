@@ -25,6 +25,7 @@ type Fastboot struct {
 	in     *gousb.InEndpoint
 	out    *gousb.OutEndpoint
 	serial string
+	speed  string
 }
 
 // GetFastboot finds and opens a fastboot device by serial number
@@ -124,6 +125,7 @@ func GetFastboot(targetSerial string) (*Fastboot, error) {
 		in:     in,
 		out:    out,
 		serial: serial,
+		speed:  dev.Desc.Speed.String(),
 	}, nil
 }
 
@@ -238,6 +240,11 @@ func (fb *Fastboot) IsFlashing() bool {
 // GetSerial returns the device serial number
 func (fb *Fastboot) GetSerial() string {
 	return fb.serial
+}
+
+// GetSpeed returns the USB connection speed
+func (fb *Fastboot) GetSpeed() string {
+	return fb.speed
 }
 
 // Close releases all resources
