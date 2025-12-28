@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -57,11 +58,13 @@ var (
 )
 
 var (
-	help    = false
-	useDNW  = false
-	bitUSB  = false
-	fuzzDPM = false
-	stop    = false
+	help         = false
+	useDNW       = false
+	bitUSB       = false
+	fuzzDPM      = false
+	stop         = false
+	testFastboot = false
+	fastbootSerial = ""
 
 	src         = "sources"
 	factory     = "bootloader.img"
@@ -140,7 +143,9 @@ func usage() {
 			" --dnw         | none   | Overrides the download address (or command) to %X\n"+
 			" --usb         | none   | Sets the 1040th byte to 01 if it is 00\n"+
 			" --fuzzdpm     | none   | (DANGEROUS!) Fuzzes an empty DPM image with random data\n"+
-			" --stop        | none   | Sends the DNW STOP command to the device upon connection\n",
+			" --stop        | none   | Sends the DNW STOP command to the device upon connection\n"+
+			" --fastboot    | none   | Skip EUB and monitor fastboot device directly\n"+
+			" --serial      | string | Specify fastboot device serial (auto-detects if omitted)\n",
 		src, factory, ota,
 		prog,
 		src, factory, ota,
@@ -150,8 +155,17 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "%s\n", text)
 }
 
+func checkRootPrivileges() {
+	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "Error: This program requires root privileges on Linux.")
+		fmt.Fprintln(os.Stderr, "Please run with: sudo ./tensor-usbdl [options]")
+		os.Exit(1)
+	}
+}
+
 func main() {
 	fmt.Printf("%s %s - %s\n", app, ver, dev)
+	checkRootPrivileges()
 
 	pflag.Usage = usage
 	pflag.CommandLine.SortFlags = false
@@ -160,6 +174,8 @@ func main() {
 	pflag.BoolVar(&bitUSB, "usb", false, "")
 	pflag.BoolVar(&fuzzDPM, "fuzzdpm", false, "")
 	pflag.BoolVar(&stop, "stop", false, "")
+	pflag.BoolVar(&testFastboot, "fastboot", false, "")
+	pflag.StringVar(&fastbootSerial, "serial", "", "")
 	pflag.StringVarP(&src, "src", "i", src, "")
 	pflag.StringVarP(&factory, "factory", "f", factory, "")
 	pflag.StringVarP(&ota, "ota", "o", ota, "")
@@ -191,6 +207,17 @@ func main() {
 	}
 
 	log = logger.NewLogger(app, 2)
+
+	// If --fastboot is specified, skip EUB and go directly to fastboot monitoring
+	if testFastboot {
+		if fastbootSerial != "" {
+			log.Infof("Testing fastboot mode with serial: %s", fastbootSerial)
+		} else {
+			log.Infoln("Testing fastboot mode (auto-detecting device)")
+		}
+		monitorFastboot(log, fastbootSerial, false) // false = don't wait 60 seconds
+		return
+	}
 
 	if header <= 0 {
 		log.Errorln("[!] Header size must be positive number!")
@@ -335,6 +362,46 @@ func main() {
 
 		request := ""
 		upload := false
+		bl3bSent := false
+		var bl3bSentTime time.Time
+		bl3bWarningShown := false
+
+		// Start background keepalive goroutine with countdown
+		keepaliveDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-keepaliveDone:
+					return
+				case <-ticker.C:
+					if dnw.Closed() {
+						continue
+					}
+					dnw.Keepalive()
+
+					if bl3bSent {
+						elapsed := time.Since(bl3bSentTime)
+						remaining := 30*time.Minute - elapsed
+						if remaining > 0 {
+							mins := int(remaining.Minutes())
+							secs := int(remaining.Seconds()) % 60
+							log.Infof("Estimated time to fastboot: ~%02d:%02d", mins, secs)
+						} else {
+							log.Infoln("Device expected to reboot to fastboot soon...")
+						}
+					} else {
+						elapsed := time.Since(timeStart)
+						if elapsed > 5*time.Minute && !bl3bWarningShown {
+							log.Warnln("BL3B not reached after 5 minutes - consider restarting the process")
+							bl3bWarningShown = true
+						}
+					}
+				}
+			}
+		}()
+
 		for {
 			if dnw.Closed() {
 				break
@@ -454,6 +521,11 @@ func main() {
 					upload = true
 				case "ack":
 					log.Debugln("Acknowledged", bootloader)
+					if bootloader == "BL3B" && !bl3bSent {
+						bl3bSent = true
+						bl3bSentTime = time.Now()
+						log.Infoln("BL3B sent - waiting for battery charge and fastboot (typically 30 minutes, may take longer)...")
+					}
 					upload = true
 				case "nak":
 					log.Errorln("Refused", bootloader)
@@ -498,6 +570,12 @@ func main() {
 			}
 		}
 
+		// Stop keepalive goroutine
+		close(keepaliveDone)
+
+		// Store serial before closing
+		deviceSerial := dnw.GetSerial()
+
 		if dnw.Closed() {
 			log.Infoln("Device disconnected!")
 		} else {
@@ -513,5 +591,72 @@ func main() {
 		dnw.Free()
 
 		log.Traceln("Connection lasted", time.Since(timeStart).String())
+
+		// Monitor fastboot if BL3B was sent
+		if bl3bSent {
+			monitorFastboot(log, deviceSerial, true) // true = wait 60 seconds first
+		}
+	}
+}
+
+// monitorFastboot polls the device in fastboot mode for battery and unlock status
+func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
+	if waitFirst {
+		log.Infoln("Waiting 60 seconds for device to enter fastboot...")
+		time.Sleep(60 * time.Second)
+	}
+
+	for {
+		// Try to connect to fastboot device
+		fb, err := tensorutils.GetFastboot(serial)
+		if err != nil {
+			log.Infoln("Device not found in fastboot mode - returning to EUB scan")
+			return
+		}
+
+		// Check if flashing is in progress (device unresponsive)
+		if fb.IsFlashing() {
+			log.Infoln("Flashing detected - exiting to allow flash to complete")
+			fb.Close()
+			return
+		}
+
+		// Get battery voltage
+		voltage, err := fb.GetVar("battery-voltage")
+		if err != nil {
+			log.Tracef("Failed to get battery voltage: %v", err)
+		} else {
+			log.Infof("Battery voltage: %s", voltage)
+			// Parse voltage and check if below threshold
+			checkBatteryVoltage(log, voltage)
+		}
+
+		// Get unlock status
+		unlocked, err := fb.GetVar("unlocked")
+		if err != nil {
+			log.Tracef("Failed to get unlock status: %v", err)
+		} else {
+			log.Infof("Unlock status: %s", unlocked)
+		}
+
+		fb.Close()
+		time.Sleep(5 * time.Minute)
+	}
+}
+
+// checkBatteryVoltage parses voltage string and warns if below 4200mV
+func checkBatteryVoltage(log *logger.Logger, voltage string) {
+	// Parse voltage like "4292 mV" or "4292mV"
+	voltage = strings.TrimSpace(voltage)
+	voltage = strings.TrimSuffix(voltage, " mV")
+	voltage = strings.TrimSuffix(voltage, "mV")
+
+	var mV int
+	if _, err := fmt.Sscanf(voltage, "%d", &mV); err == nil {
+		if mV < 4200 {
+			log.Warnf("Battery at %dmV - keep waiting, need at least 4200mV for stable boot", mV)
+		} else {
+			log.Infof("Battery at %dmV - sufficient for boot (full charge may take up to 24 hours)", mV)
+		}
 	}
 }

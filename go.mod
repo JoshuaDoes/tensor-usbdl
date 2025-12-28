@@ -7,6 +7,7 @@ require go.bug.st/serial v1.6.2
 require (
 	github.com/JoshuaDoes/crunchio v0.0.4 // indirect
 	github.com/JoshuaDoes/logger v0.0.1 // indirect
+	github.com/google/gousb v1.1.3 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect

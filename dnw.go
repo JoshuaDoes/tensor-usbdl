@@ -3,6 +3,7 @@ package tensorutils
 import (
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -217,9 +218,10 @@ func (dnw *DNW) WriteMsg(msg *Message) error {
 	r.Seek(0, io.SeekEnd) //Seek to the end of the buffer to only process new responses after writing each block*/
 
 	//Write on loop until the end of message or error
-	blockSize := 10240
+	blockSize := 4096 // Smaller block size for stability
 	left := blockSize
 	wrote := 0
+	maxRetries := 5
 	for {
 		if dnw.Closed() {
 			return fmt.Errorf("dnw: closed but only wrote %d/%d bytes", wrote, len(p))
@@ -253,7 +255,27 @@ func (dnw *DNW) WriteMsg(msg *Message) error {
 			left -= (wrote + left) - len(p)
 		}
 
-		n, err := dnw.write(p[wrote : wrote+left])
+		// Retry loop for transient errors
+		var n int
+		var err error
+		for retry := 0; retry < maxRetries; retry++ {
+			n, err = dnw.write(p[wrote : wrote+left])
+			if err == nil {
+				break
+			}
+			errStr := strings.ToLower(err.Error())
+			isRetryable := strings.Contains(errStr, "interrupted") ||
+				strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "resource temporarily unavailable") ||
+				strings.Contains(errStr, "eagain") ||
+				strings.Contains(errStr, "busy")
+			if isRetryable {
+				fmt.Printf("dnw: write error at %d/%d bytes, retry %d/%d: %v\n", wrote+n, len(p), retry+1, maxRetries, err)
+				time.Sleep(time.Millisecond * 50)
+				continue
+			}
+			break // Non-retryable error
+		}
 		wrote += n
 		if err != nil {
 			return fmt.Errorf("dnw: failed to write after %d/%d bytes: %v", wrote, len(p), err)
@@ -266,7 +288,7 @@ func (dnw *DNW) WriteMsg(msg *Message) error {
 		return fmt.Errorf("dnw: only wrote %d/%d bytes", wrote, len(p))
 	}
 
-	time.Sleep(1)
+	time.Sleep(time.Millisecond * 1)
 	return nil
 }
 func (dnw *DNW) Write(p []byte) (int, error) {
@@ -284,7 +306,10 @@ func (dnw *DNW) write(p []byte) (int, error) {
 		return n, err
 	}
 	if err := dnw.port.Drain(); err != nil {
-		return n, err
+		// Drain errors are often transient, only fail on non-interrupted
+		if !strings.Contains(err.Error(), "interrupted") {
+			return n, err
+		}
 	}
 	return n, nil
 }
@@ -359,4 +384,13 @@ func (dnw *DNW) GetUSB() bool {
 		return false
 	}
 	return dnw.info.IsUSB
+}
+
+// Keepalive reads modem status bits to keep USB connection active
+func (dnw *DNW) Keepalive() error {
+	if dnw.Closed() {
+		return fmt.Errorf("dnw: closed")
+	}
+	_, err := dnw.port.GetModemStatusBits()
+	return err
 }
