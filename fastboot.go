@@ -183,6 +183,51 @@ func (fb *Fastboot) readFinalResponse(timeout time.Duration) (string, error) {
 	}
 }
 
+// OemCommand sends an OEM command and returns all INFO responses
+func (fb *Fastboot) OemCommand(cmd string) ([]string, error) {
+	return fb.OemCommandWithTimeout(cmd, 5*time.Second)
+}
+
+// OemCommandWithTimeout sends an OEM command with a custom timeout
+func (fb *Fastboot) OemCommandWithTimeout(cmd string, timeout time.Duration) ([]string, error) {
+	fullCmd := fmt.Sprintf("oem %s", cmd)
+	_, err := fb.out.Write([]byte(fullCmd))
+	if err != nil {
+		return nil, fmt.Errorf("fastboot: write failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var responses []string
+	for {
+		buf := make([]byte, 256)
+		n, err := fb.in.ReadContext(ctx, buf)
+		if err != nil {
+			return responses, fmt.Errorf("fastboot: read failed: %v", err)
+		}
+
+		resp := string(buf[:n])
+		if strings.HasPrefix(resp, "OKAY") {
+			return responses, nil
+		} else if strings.HasPrefix(resp, "FAIL") {
+			errMsg := strings.TrimPrefix(resp, "FAIL")
+			if errMsg == "" && len(responses) > 0 {
+				// Some commands return error details in INFO
+				return responses, fmt.Errorf("command failed")
+			}
+			return responses, fmt.Errorf("%s", errMsg)
+		} else if strings.HasPrefix(resp, "INFO") {
+			// Strip "INFO" prefix and collect the response
+			info := strings.TrimPrefix(resp, "INFO")
+			responses = append(responses, info)
+		} else {
+			// Unknown response type, include it anyway
+			responses = append(responses, resp)
+		}
+	}
+}
+
 // IsFlashing checks if device is busy (unresponsive to getvar)
 func (fb *Fastboot) IsFlashing() bool {
 	// Use short timeout - if device is flashing, it won't respond quickly

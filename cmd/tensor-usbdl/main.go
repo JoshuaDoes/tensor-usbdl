@@ -385,9 +385,8 @@ func main() {
 						elapsed := time.Since(bl3bSentTime)
 						remaining := 30*time.Minute - elapsed
 						if remaining > 0 {
-							mins := int(remaining.Minutes())
-							secs := int(remaining.Seconds()) % 60
-							log.Infof("Estimated time to fastboot: ~%02d:%02d", mins, secs)
+							mins := int(remaining.Minutes()) + 1 // Round up
+							log.Infof("Estimated time to fastboot: ~%d minutes", mins)
 						} else {
 							log.Infoln("Device expected to reboot to fastboot soon...")
 						}
@@ -594,7 +593,24 @@ func main() {
 
 		// Monitor fastboot if BL3B was sent
 		if bl3bSent {
-			monitorFastboot(log, deviceSerial, true) // true = wait 60 seconds first
+			// First, scan for EUB reconnection for 60 seconds
+			log.Infoln("Scanning for EUB reconnection (60 seconds)...")
+			eubFound := false
+			for i := 0; i < 20; i++ { // 20 checks * 3 seconds = 60 seconds
+				time.Sleep(3 * time.Second)
+				testDnw, err := tensorutils.GetDNW()
+				if err == nil {
+					log.Infoln("Device reconnected to EUB mode")
+					testDnw.Close()
+					eubFound = true
+					break
+				}
+			}
+
+			// If no EUB reconnection, switch to fastboot scanning
+			if !eubFound {
+				monitorFastboot(log, deviceSerial, false)
+			}
 		}
 	}
 }
@@ -602,23 +618,46 @@ func main() {
 // monitorFastboot polls the device in fastboot mode for battery and unlock status
 func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 	if waitFirst {
-		log.Infoln("Waiting 60 seconds for device to enter fastboot...")
-		time.Sleep(60 * time.Second)
+		log.Infoln("Waiting for device to enter fastboot (up to 10 minutes)...")
 	}
 
-	for {
-		// Try to connect to fastboot device
-		fb, err := tensorutils.GetFastboot(serial)
-		if err != nil {
-			log.Infoln("Device not found in fastboot mode - returning to EUB scan")
-			return
-		}
+	// Wait up to 10 minutes for fastboot device to appear, checking every 30 seconds
+	var fb *tensorutils.Fastboot
+	var err error
+	maxWait := 10 * time.Minute
+	checkInterval := 30 * time.Second
+	waited := time.Duration(0)
 
+	for waited < maxWait {
+		fb, err = tensorutils.GetFastboot(serial)
+		if err == nil {
+			break // Found device
+		}
+		time.Sleep(checkInterval)
+		waited += checkInterval
+	}
+
+	if fb == nil {
+		log.Infoln("Device not found in fastboot mode after 10 minutes - returning to EUB scan")
+		return
+	}
+
+	log.Infoln("Device found in fastboot mode")
+
+	firstConnection := true
+	for {
 		// Check if flashing is in progress (device unresponsive)
 		if fb.IsFlashing() {
 			log.Infoln("Flashing detected - exiting to allow flash to complete")
 			fb.Close()
 			return
+		}
+
+		// On first connection, display full device info
+		if firstConnection {
+			log.Infoln("=== Fastboot Device Info ===")
+			displayFastbootInfo(log, fb)
+			firstConnection = false
 		}
 
 		// Get battery voltage
@@ -641,7 +680,75 @@ func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 
 		fb.Close()
 		time.Sleep(5 * time.Minute)
+
+		// Reconnect for next check
+		fb, err = tensorutils.GetFastboot(serial)
+		if err != nil {
+			log.Infoln("Device disconnected from fastboot - returning to EUB scan")
+			return
+		}
 	}
+}
+
+// displayFastbootInfo queries and displays device information from fastboot
+func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
+	// Device identification
+	if val, err := fb.GetVar("product"); err == nil {
+		log.Infof("Product: %s", val)
+	}
+	if val, err := fb.GetVar("hw-revision"); err == nil {
+		log.Infof("Product revision: %s", val)
+	}
+	if val, err := fb.GetVar("version-bootloader"); err == nil {
+		log.Infof("Bootloader version: %s", val)
+	}
+	if val, err := fb.GetVar("version-baseband"); err == nil {
+		log.Infof("Baseband version: %s", val)
+	}
+	if val, err := fb.GetVar("serialno"); err == nil {
+		log.Infof("Serial number: %s", val)
+	}
+
+	// Security state
+	if val, err := fb.GetVar("secure"); err == nil {
+		log.Infof("Secure boot: %s", val)
+	}
+	if val, err := fb.GetVar("nos-production"); err == nil {
+		log.Infof("NOS production: %s", val)
+	}
+	if val, err := fb.GetVar("unlocked"); err == nil {
+		log.Infof("Device state: %s", val)
+	}
+
+	// GSC (Titan M) version
+	if responses, err := fb.OemCommand("gsc version"); err == nil {
+		for _, line := range responses {
+			log.Infof("GSC: %s", strings.TrimSpace(line))
+		}
+	} else {
+		log.Tracef("GSC version: %v", err)
+	}
+
+	// Hardware info
+	if val, err := fb.GetVar("dram-manufacturer"); err == nil {
+		log.Infof("DRAM: %s", val)
+	}
+	if val, err := fb.GetVar("ufs-manufacturer"); err == nil {
+		log.Infof("UFS: %s", val)
+	}
+
+	// Boot info
+	if val, err := fb.GetVar("current-slot"); err == nil {
+		log.Infof("Boot slot: %s", val)
+	}
+	if val, err := fb.GetVar("reason"); err == nil {
+		log.Infof("Enter reason: %s", val)
+	}
+	if val, err := fb.GetVar("uart"); err == nil {
+		log.Infof("UART: %s", val)
+	}
+
+	log.Infoln("============================")
 }
 
 // checkBatteryVoltage parses voltage string and warns if below 4200mV

@@ -21,6 +21,14 @@ func (fb *Fastboot) GetVarWithTimeout(name string, timeout time.Duration) (strin
 	return "", fmt.Errorf("fastboot not available")
 }
 
+func (fb *Fastboot) OemCommand(cmd string) ([]string, error) {
+	return nil, fmt.Errorf("fastboot not available")
+}
+
+func (fb *Fastboot) OemCommandWithTimeout(cmd string, timeout time.Duration) ([]string, error) {
+	return nil, fmt.Errorf("fastboot not available")
+}
+
 func (fb *Fastboot) IsFlashing() bool {
 	return false
 }
