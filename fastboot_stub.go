@@ -57,6 +57,10 @@ func (fb *Fastboot) Reset() error {
 	return fmt.Errorf("fastboot not available")
 }
 
+func (fb *Fastboot) GetBusAddr() (int, int) {
+	return 0, 0
+}
+
 func (fb *Fastboot) Close() error {
 	return nil
 }

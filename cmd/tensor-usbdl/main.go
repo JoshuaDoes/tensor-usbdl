@@ -673,7 +673,7 @@ func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 			log.Tracef("Failed to get battery current: %v", cErr)
 		}
 		if vErr == nil || cErr == nil {
-			checkBatteryStatus(log, fb, voltage, current, isFirstConnection)
+			checkBatteryStatus(log, voltage, current, isFirstConnection)
 		}
 
 		// Check if charging has stopped (battery full or not charging)
@@ -739,7 +739,7 @@ func monitorFastboot(log *logger.Logger, serial string, waitFirst bool) {
 						// Show battery status while waiting
 						voltage, _ := testFb.GetVar("battery-voltage")
 						current, _ := testFb.GetVar("battery-current")
-						checkBatteryStatus(log, testFb, voltage, current, false)
+						checkBatteryStatus(log, voltage, current, false)
 						testFb.Close()
 					}
 					log.Infoln("Device disconnected, continuing to EUB mode...")
@@ -805,8 +805,11 @@ func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
 	}
 
 	// Hardware info
-	if val, err := fb.GetVar("dram-manufacturer"); err == nil {
-		log.Infof("DRAM: %s", val)
+	ddrManu, _ := fb.GetVar("ddr-manu")
+	ddrSize, _ := fb.GetVar("ddr-size")
+	ddrType, _ := fb.GetVar("ddr-type")
+	if ddrManu != "" || ddrSize != "" || ddrType != "" {
+		log.Infof("DRAM: %s %s %s", ddrManu, ddrType, ddrSize)
 	}
 	if val, err := fb.GetVar("ufs-manufacturer"); err == nil {
 		log.Infof("UFS: %s", val)
@@ -837,7 +840,7 @@ func displayFastbootInfo(log *logger.Logger, fb *tensorutils.Fastboot) {
 }
 
 // checkBatteryStatus displays combined battery voltage and current status
-func checkBatteryStatus(log *logger.Logger, fb *tensorutils.Fastboot, voltage string, current string, isFirstConnection bool) {
+func checkBatteryStatus(log *logger.Logger, voltage string, current string, isFirstConnection bool) {
 	mV := parseVoltage(voltage)
 	mA := parseCurrentMA(current)
 
@@ -846,16 +849,10 @@ func checkBatteryStatus(log *logger.Logger, fb *tensorutils.Fastboot, voltage st
 
 	// Determine status message based on voltage and current
 	if mA < 0 {
-		// Discharging
-		log.Warnf("Battery: %smV @ %smA - DISCHARGING! Try a different USB port/cable", fmtV, fmtA)
-		if isFirstConnection && fb != nil {
-			log.Infoln("Attempting USB reset to restart charging...")
-			if err := fb.Reset(); err != nil {
-				log.Warnf("USB reset failed: %v", err)
-				log.Warnf("TIP: Try unplugging and replugging the device manually")
-			} else {
-				log.Infoln("USB reset sent - charging should start soon")
-			}
+		// Discharging - device is not charging properly
+		log.Warnf("Battery: %smV @ %smA - DISCHARGING!", fmtV, fmtA)
+		if isFirstConnection {
+			log.Warnf(">>> UNPLUG AND REPLUG the USB cable to restart charging <<<")
 		}
 	} else if mV < 4200 {
 		// Need more charge

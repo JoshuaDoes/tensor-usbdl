@@ -296,6 +296,14 @@ func (fb *Fastboot) Reset() error {
 	return fb.dev.Reset()
 }
 
+// GetBusAddr returns the USB bus number and device address
+func (fb *Fastboot) GetBusAddr() (int, int) {
+	if fb.dev == nil {
+		return 0, 0
+	}
+	return fb.dev.Desc.Bus, fb.dev.Desc.Address
+}
+
 // Close releases all resources
 func (fb *Fastboot) Close() error {
 	if fb.done != nil {
