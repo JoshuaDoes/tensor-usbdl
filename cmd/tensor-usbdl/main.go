@@ -48,7 +48,7 @@ DNW:
 
 const (
 	app = "Tensor-USBDL"
-	ver = "v0.1.0"
+	ver = "v0.2.0"
 	dev = "JoshuaDoes"
 )
 
@@ -324,6 +324,7 @@ func main() {
 		log.Traceln("- ID:    ", dnw.GetID())
 		log.Traceln("- Serial:", dnw.GetSerial())
 		log.Traceln("- USB:   ", dnw.GetUSB())
+		device := Identify(dnw.GetID())
 
 		//Send a newline character to make sure the device sends us the first message
 		dnw.Write([]byte{'\n'})
@@ -375,7 +376,14 @@ func main() {
 					op = 0
 				case "EPBL":
 					bl = bootloaders["PBL"]
-					op = 0
+					if device.Brand == "Google" && device.Model == "Pixel 8 series" {
+						op = 1
+					} else {
+						op = 0
+					}
+				case "EPBB":
+					bl = bootloaders["PBL"]
+					op = 2
 				case "BL2":
 					bl = bootloaders["BL2"]
 					op = 1
@@ -440,7 +448,9 @@ func main() {
 			case "\x00":
 				log.Tracef("Received control: 0x%0X", msg.Command())
 			case "exynos_usb_booting":
+				device = Identify(msg.Device())
 				log.Debugln("Device identified as", msg.Device())
+				log.Infoln("Device detected:", device.String())
 			case "eub":
 				bootloader := strings.ToUpper(msg.Argument())
 				switch msg.SubCommand() {
